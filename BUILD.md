@@ -2,6 +2,8 @@
 
 Updated October 24, 2026. Start with the [ordering BOM](BOM.md).
 
+Available design tools: Fusion 360 and SolidWorks. New mechanical designs should retain editable native source, dimensioned assembly/interface information and STEP exports alongside print meshes. The prototype bench supply, PLA/PETG/TPU and X1 Carbon are available; the Pi model needs confirmation. Team kit count remains unspecified.
+
 ## Selected starting point
 
 This fork starts at AI-FanGe/Microduck-build-tutorial commit `49678215d0b40529522772a40c06c216390449dd`. The reference hardware is Pi Zero 2 W, OpenRB-150, BNO08x and fourteen XL330-M288-T servos, with an optional fifteenth beak servo. It supplies a printable Bambu project, deployment source and a walking ONNX file. The upstream real-robot media is evidence of the author's build, not of ours.
