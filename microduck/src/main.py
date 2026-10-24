@@ -4,6 +4,7 @@
 import time
 import numpy as np
 import os
+import sys
 from pathlib import Path
 
 from constants import MOTOR_TO_ID, NEUTRAL_POSE, KP_DEFAULT
@@ -79,19 +80,18 @@ def main() -> None:
 
     PID_FILE.write_text(f"{os.getpid()}\n", encoding="ascii")
 
-    controller = RobotController()
+    controller = None
+    input_source = None
+    scheduler = None
     motor_ids = list(MOTOR_TO_ID.values())
-    controller.sync_write_torque_enable(motor_ids, [True] * len(motor_ids))
-    controller.sync_write_status_return_level(motor_ids, [1] * len(motor_ids))
-    controller.sync_write_kp(motor_ids, [KP_DEFAULT] * len(motor_ids))
 
     try:
-        ramp_to_neutral(controller)
-
+        controller = RobotController()
+        input_source = build_input_source()
         scheduler = Scheduler(
             frequency_hz=50.0,
             controller=controller,
-            input_source=build_input_source(),
+            input_source=input_source,
             moves={
                 "walk": WalkMove(controller=controller),
             },
@@ -99,6 +99,12 @@ def main() -> None:
 
         for move in scheduler.registered_moves.values():
             move.preload()
+
+        # Validate inputs and load the policy before arming any motor.
+        controller.sync_write_status_return_level(motor_ids, [1] * len(motor_ids))
+        controller.sync_write_kp(motor_ids, [KP_DEFAULT] * len(motor_ids))
+        controller.sync_write_torque_enable(motor_ids, [True] * len(motor_ids))
+        ramp_to_neutral(controller)
 
         # Flush stale UART bytes accumulated during preload
         for _ in range(10):
@@ -110,8 +116,32 @@ def main() -> None:
         scheduler.run()
 
     finally:
-        if PID_FILE.exists():
-            PID_FILE.unlink()
+        primary_error = sys.exception()
+        cleanup_errors = []
+        if scheduler is not None:
+            # The scheduler owns controller/input cleanup once constructed.
+            actions = [("scheduler cleanup", scheduler.cleanup)]
+        else:
+            actions = []
+            if controller is not None:
+                actions.append(("torque off", lambda: controller.sync_write_torque_enable(
+                    motor_ids, [False] * len(motor_ids))))
+            if input_source is not None:
+                actions.append(("input stop", input_source.stop))
+            if controller is not None:
+                actions.append(("controller close", controller.close))
+        actions.append(("PID cleanup", lambda: PID_FILE.unlink(missing_ok=True)))
+        for name, action in actions:
+            try:
+                action()
+            except BaseException as exc:
+                cleanup_errors.append((name, exc))
+        if cleanup_errors:
+            error = primary_error or cleanup_errors[0][1]
+            for name, exc in cleanup_errors:
+                error.add_note(f"{name} failed: {type(exc).__name__}: {exc}")
+            if primary_error is None:
+                raise error
 
 
 if __name__ == "__main__":

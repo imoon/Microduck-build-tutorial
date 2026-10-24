@@ -3,6 +3,7 @@
 
 import time
 import math
+import sys
 from collections import deque
 from pathlib import Path
 from typing import Optional
@@ -69,10 +70,9 @@ class Scheduler:
         if self.stop_flag_path.exists():
             self.stop_flag_path.unlink()
 
-        if self.input_source:
-            self.input_source.start()
-
         try:
+            if self.input_source:
+                self.input_source.start()
             while True:
                 if self.stop_flag_path.exists():
                     print("Stop requested through stop flag", end="\r\n", flush=True)
@@ -173,28 +173,38 @@ class Scheduler:
         except KeyboardInterrupt:
             print("Control loop interrupted by user", end="\r\n", flush=True)
         finally:
-            self._cleanup()
+            self.cleanup()
 
-    def _cleanup(self) -> None:
-        """Disable torque, stop input source, and clear stop artifacts."""
+    def cleanup(self) -> None:
+        """Attempt torque-off first, then every other cleanup, once."""
         if self._cleanup_done:
             return
 
         self._cleanup_done = True
-
-        if self.input_source:
-            self.input_source.stop()
-
-        shutdown = getattr(self.controller, "shutdown", None)
-        if callable(shutdown):
-            shutdown()
-
+        primary_error = sys.exception()
+        cleanup_errors = []
         motor_ids = list(MOTOR_TO_ID.values())
-        self.controller.sync_write_torque_enable(motor_ids, [False] * len(motor_ids))
-        print("Torque disabled on all motors", end="\r\n", flush=True)
-
-        if self.stop_flag_path.exists():
-            self.stop_flag_path.unlink()
+        actions = [("torque off", lambda: self.controller.sync_write_torque_enable(
+            motor_ids, [False] * len(motor_ids)))]
+        if self.input_source:
+            actions.append(("input stop", self.input_source.stop))
+        close = getattr(self.controller, "close", None)
+        if not callable(close):
+            close = getattr(self.controller, "shutdown", None)
+        if callable(close):
+            actions.append(("controller close", close))
+        actions.append(("stop flag cleanup", lambda: self.stop_flag_path.unlink(missing_ok=True)))
+        for name, action in actions:
+            try:
+                action()
+            except BaseException as exc:
+                cleanup_errors.append((name, exc))
+        if cleanup_errors:
+            error = primary_error or cleanup_errors[0][1]
+            for name, exc in cleanup_errors:
+                error.add_note(f"{name} failed: {type(exc).__name__}: {exc}")
+            if primary_error is None:
+                raise error
 
     def _estimate_total_current(self, robot_state, target_angles: dict[str, float]) -> float:
         """Estimate the total pack current [A] from whichever signal is available.
@@ -230,7 +240,7 @@ class Scheduler:
         """Report when the estimated total pack current stays above OVERCURRENT_CUTOFF_A
         for OVERCURRENT_DEBOUNCE_TICKS consecutive ticks.
 
-        When True, the run loop breaks and _cleanup() disables torque on every motor,
+        When True, the run loop breaks and cleanup() disables torque on every motor,
         leaving the robot compliant so the BMS does not trip on the current spike.
         """
         total_current = self._estimate_total_current(robot_state, target_angles)
